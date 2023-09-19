@@ -1,7 +1,5 @@
 import asyncio
-import logging
 
-logging.basicConfig(level=logging.INFO)
 
 class ChatClient:
     def __init__(self, host='127.0.0.1', port=8000):
@@ -24,7 +22,9 @@ class ChatClient:
 
     async def run(self):
         try:
-            reader, writer = await asyncio.open_connection(self.host, self.port)
+            reader, writer = (
+                await asyncio.open_connection(self.host, self.port)
+            )
         except ConnectionRefusedError:
             raise SystemExit('Не получилось подключиться к серверу')
 

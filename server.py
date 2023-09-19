@@ -1,4 +1,3 @@
-import sys
 import asyncio
 from asyncio import Task
 from asyncio.streams import StreamReader, StreamWriter
