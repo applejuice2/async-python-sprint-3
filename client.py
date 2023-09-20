@@ -1,5 +1,7 @@
 import asyncio
 
+from messages_templates import help_message
+
 
 class ChatClient:
     def __init__(self, host='127.0.0.1', port=8000):
@@ -28,15 +30,16 @@ class ChatClient:
         except ConnectionRefusedError:
             raise SystemExit('Не получилось подключиться к серверу')
 
+        print(help_message)
         while True:
             try:
-                message = input("> ")
-                if message:
+                if message := input("> "):
                     await self.send_command(writer, reader, message)
             except (ConnectionResetError, ConnectionRefusedError):
                 raise SystemExit('Соединение потеряно')
             except KeyboardInterrupt:
                 raise SystemExit('Соединение закрыто')
+
 
 if __name__ == "__main__":
     client = ChatClient()
