@@ -1,3 +1,4 @@
+from asyncio import StreamWriter
 from enum import Enum
 
 from pydantic import BaseModel
@@ -54,3 +55,19 @@ class UserInfo(BaseModel):
     # Индексы последних прочитанных сообщений для каждого чата.
     last_read: dict[ChatID, int] = {}
     reports: Report
+    writer: StreamWriter
+
+    class Config:
+        # arbitrary_types_allowed=True в конфигурации модели,
+        # разрешает использовать произвольные (нестандартные) типы 
+        # в вашей модели. 
+        # Это означает, что Pydantic не будет пытаться валидировать или 
+        # преобразовывать эти типы, а просто принимать их как есть.
+
+        # Настройка arbitrary_types_allowed = True влияет только на те поля, 
+        # которые используют нестандартные типы, которые Pydantic не может 
+        # обработать автоматически. 
+        # Это не отключает валидацию и преобразование для стандартных полей, 
+        # которые Pydantic может обрабатывать. 
+        arbitrary_types_allowed = True
+

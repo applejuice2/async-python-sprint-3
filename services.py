@@ -7,7 +7,6 @@ from config import BAN_TIME, MAX_REPORTS
 from config import Status, ClientAddress, Message, ChatID, Report, UserInfo
 from messages_templates import (
     ban,
-    sign_in_required,
     success_registration,
     already_signed_in,
     success_sign_in,
@@ -43,12 +42,15 @@ from messages_templates import (
     succefully_cancel_delayed_message,
     create_scheduled_message,
     sending_delayed_message,
-    cancel_scheduled_message
+    cancel_scheduled_message,
+    user_disconnected,
+    user_already_signed_in,
+    general_chat_new_message,
 )
 
 
 class AuthHandlers:
-    def __init__(self, server_instance):
+    def __init__(self, server_instance: 'ChatServer'):
         # Экземпляр основного серверного класса
         self.server = server_instance
 
@@ -64,13 +66,18 @@ class AuthHandlers:
             writer.write(no_username.encode())
             return
 
+        if username:
+            writer.write(user_already_signed_in.encode())
+            return
+
         username = command_args[0]
-        if username not in self.users:
+        if username not in self.server.users:
             logger.info(new_registration, username)
             user_info = UserInfo(
                 status=Status.ONLINE,
                 client_addr=client_addr,
-                reports=Report()
+                reports=Report(),
+                writer=writer
             )
             self.server.users[username] = user_info
             chat_log = self.server.general_chat[-20:]
@@ -83,33 +90,42 @@ class AuthHandlers:
             return
 
         logger.info(signed_in, username)
-        new_user_info = UserInfo(
-            **user_info.model_dump(),
-            status=Status.ONLINE,
-            client_addr=client_addr
-        )
-        self.server.users[username] = new_user_info
-        chat_log = new_user_info.unread_messages
+        user_info.status = Status.ONLINE
+        user_info.client_addr = client_addr
+        user_info.writer = writer
+        chat_log = user_info.unread_messages
         writer.write(success_sign_in.format(chat_log).encode())
-        new_user_info.unread_messages.clear()
-        self.server.users[username] = new_user_info
+        user_info.unread_messages.clear()
         return username
+    
+    async def handle_sign_out(
+            self,
+            command_args: list[str],
+            writer: StreamWriter,
+            username: Optional[str],
+            client_addr: ClientAddress
+    ) -> None:
+        """Обработка выхода пользователя из системы."""
+        logger.info(user_disconnected, username, client_addr)
+        if username:
+            user_info = self.server.users[username]
+            user_info.status = Status.OFFLINE
 
 
 class MessageHandlers:
-    def __init__(self, server_instance):
+    def __init__(self, server_instance: 'ChatServer'):
         self.server = server_instance
 
     def _check_ban(
             self,
-            username: Optional[str],
-            writer: StreamWriter
+            username: Optional[str]
     ) -> bool:
         """Проверка, забанен ли пользователь."""
         loop = asyncio.get_running_loop()
         current_time = loop.time()
         user_info = self.server.users[username]
         end_of_ban = user_info.reports.end_of_ban
+        writer = user_info.writer
 
         if current_time < end_of_ban:
             logger.warning(banned_user_message, username)
@@ -122,53 +138,59 @@ class MessageHandlers:
             self.server.users[username].reports = base_report
         return False
 
-    def _require_sign_in(self, writer: StreamWriter) -> None:
-        """Требование входа в систему, если пользователь не авторизован."""
-        writer.write(sign_in_required.encode())
-
     async def handle_send_all(
             self,
             command_args: list[str],
-            writer: StreamWriter,
             username: Optional[str]
     ) -> None:
         """Обработчик команды отправки сообщения всем пользователям."""
-        if not username:
-            self._require_sign_in(writer)
+        if self._check_ban(username):
             return
 
-        if self._check_ban(username, writer):
-            return
-
+        writer = self.server.users[username].writer
         if not command_args:
             writer.write(empty_message.encode())
             return
 
         logger.info(send_message, username)
+        message = ' '.join(command_args)
         self.server.general_chat.append(
-            Message(sender=username, text=' '.join(command_args))
+            Message(sender=username, text=message)
         )
         writer.write(successfully_sended.encode())
         for user in self.server.users:
             user_info = self.server.users[user]
             user_info.unread_messages.append(
-                Message(sender=username, text=' '.join(command_args))
+                Message(sender=username, text=message)
             )
+
+            # NOTE Реализация отправки новых сообщений
+            # всем пользователям в режиме ONLINE сразу же после добавления
+            # нового сообщения в общий чат.
+            if user_info.status == Status.ONLINE:
+                user_writer = user_info.writer
+                # Попробуем отправить сообщение, но будем готовы к ошибкам.
+                # Например, если пользователь внезапно отключится.
+                try:
+                    user_writer.write(
+                        general_chat_new_message.format(message, username).encode()
+                    )
+                    await user_writer.drain()
+                # NOTE Это нужно, так как во время отправки какой-то из 
+                # пользователей self.server.user может выйти из приложения.
+                except ConnectionResetError:
+                    pass
 
     async def handle_send(
             self,
             command_args: list[str],
-            writer: StreamWriter,
             username: Optional[str]
     ) -> None:
         """Обработчик команды отправки личного сообщения."""
-        if not username:
-            self._require_sign_in(writer)
+        if self._check_ban(username):
             return
 
-        if self._check_ban(username, writer):
-            return
-
+        writer = self.server.users[username].writer
         if len(command_args) < 2:
             writer.write(no_username_or_empty_msg.encode())
             return
@@ -191,13 +213,10 @@ class MessageHandlers:
     async def handle_get_chat_with(
             self,
             command_args: list[str],
-            writer: StreamWriter,
             username: Optional[str]
     ) -> None:
         """Обработчик команды получения личного чата с пользователем."""
-        if not username:
-            self._require_sign_in(writer)
-            return
+        writer = self.server.users[username].writer
 
         if not command_args:
             writer.write(no_username.encode())
@@ -230,13 +249,10 @@ class MessageHandlers:
     async def handle_status(
             self,
             command_args: list[str],
-            writer: StreamWriter,
             username: Optional[str]
     ) -> None:
         """Обработчик команды проверки статуса пользователя."""
-        if not username:
-            self._require_sign_in(writer)
-            return
+        writer = self.server.users[username].writer
 
         logger.info(get_status, username)
         users_info = (
@@ -251,13 +267,10 @@ class MessageHandlers:
     async def handle_report(
             self,
             command_args: list[str],
-            writer: StreamWriter,
             username: Optional[str]
     ) -> None:
         """Обработчик команды отправки жалобы на пользователя."""
-        if not username:
-            self._require_sign_in(writer)
-            return
+        writer = self.server.users[username].writer
 
         if not command_args:
             writer.write(no_username.encode())
@@ -293,13 +306,10 @@ class MessageHandlers:
     async def handle_send_delayed(
             self,
             command_args: list[str],
-            writer: StreamWriter,
             username: Optional[str]
     ) -> None:
         """Обработчик команды отправки отложенного сообщения."""
-        if not username:
-            self._require_sign_in(writer)
-            return
+        writer = self.server.users[username].writer
 
         if len(command_args) < 3:
             writer.write(not_all_params_given.encode())
@@ -324,8 +334,7 @@ class MessageHandlers:
             self.send_scheduled_message(
                 message,
                 target_username,
-                delay,
-                writer
+                delay
             )
         )
 
@@ -344,28 +353,23 @@ class MessageHandlers:
             self,
             message: Message,
             target_username: str,
-            delay: int,
-            writer: StreamWriter
+            delay: int
     ) -> None:
         """Отправка отложенного сообщения."""
         await asyncio.sleep(delay)
         logger.info(sending_delayed_message, message.sender, target_username)
         await self.handle_send(
             [target_username, message.text],
-            writer,
             message.sender
         )
 
     async def handle_cancel_scheduled(
             self,
             command_args: list[str],
-            writer: StreamWriter,
             username: Optional[str]
     ) -> None:
         """Обработчик команды для отмены отложенного сообщения."""
-        if not username:
-            self._require_sign_in(writer)
-            return
+        writer = self.server.users[username].writer
 
         if len(command_args) != 1:
             writer.write(no_id_given.encode())

@@ -4,15 +4,15 @@ from asyncio.streams import StreamReader, StreamWriter
 from typing import Optional
 
 from custom_logger import logger
-from config import Status, ClientAddress, Message, ChatID, UserInfo
+from config import ClientAddress, Message, ChatID, UserInfo
 from services import AuthHandlers, MessageHandlers
 from messages_templates import (
     unknown_command,
     server_initialized,
-    user_disconnected,
     get_command,
     new_connection,
     server_started,
+    sign_in_required,
 )
 
 
@@ -37,6 +37,7 @@ class ChatServer:
         self.message_handler = MessageHandlers(self)
         self.auth_handlers = {
             '/sign_in': self.auth_handler.handle_sign_in,
+            '/sign_out': self.auth_handler.handle_sign_out,
         }
         self.command_handlers = {
             '/send_all': self.message_handler.handle_send_all,
@@ -48,17 +49,9 @@ class ChatServer:
         }
         logger.info(server_initialized, host, port)
 
-    def _logout_user(
-            self,
-            client_addr: ClientAddress,
-            username: Optional[str]
-    ) -> None:
-        """Обработка выхода пользователя из системы."""
-        logger.info(user_disconnected, username, client_addr)
-        if username:
-            # self.users[username]['status'] = Status.OFFLINE
-            user_info = self.users[username]
-            user_info.status = Status.OFFLINE
+    def _require_sign_in(self, writer: StreamWriter) -> None:
+        """Требование входа в систему, если пользователь не авторизован."""
+        writer.write(sign_in_required.encode())
 
     async def handle_command(
             self,
@@ -75,8 +68,13 @@ class ChatServer:
                 command_args, writer, username, client_addr
             )
         elif command in self.command_handlers:
-            return await self.command_handlers[command](
-                command_args, writer, username
+            # Команды из command_handlers могут выполнять только
+            # авторизованные пользователи.
+            if not username:
+                self._require_sign_in(writer)
+                return
+            await self.command_handlers[command](
+                command_args, username
             )
         else:
             writer.write(unknown_command.format(command).encode())
@@ -95,7 +93,9 @@ class ChatServer:
             data = await reader.read(4096)
 
             if not data:
-                self._logout_user(client_addr, username)
+                await self.handle_command(
+                    '/sign_out', [], writer, username, client_addr
+                )
                 break
 
             message = data.decode().strip()
